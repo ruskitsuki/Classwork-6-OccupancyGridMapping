@@ -14,7 +14,7 @@ except ImportError:
 
 # ================= CONFIG =================
 CONN_TYPE = "ap"
-OUTPUT_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = Path(__file__).resolve().parent / "Classwork 6 OccupancyGridMapping"
 
 GRID_SIZE = 4
 MOVE_DISTANCE_M = 0.60
@@ -33,16 +33,21 @@ FRONT_WALL_LIMIT_MM = 400.0  # ระยะ ToF ต่ำกว่า 40 cm (400
 FRONT_COLLISION_LIMIT_MM = 150.0  # ต่ำกว่า 15 cm ให้หยุดและถอยทันที
 FRONT_SAFE_TARGET_MM = 175.0      # ระยะเป้าหมายหลังถอย 17.5 cm
 FRONT_SAFE_MAX_MM = 200.0         # ช่วงปลอดภัยสูงสุด 20 cm
-FRONT_RETREAT_MAX_STEP_M = 0.08   # ถอยครั้งละไม่เกิน 8 cm
-FRONT_RETREAT_MAX_ATTEMPTS = 3
-FRONT_RETREAT_SPEED = 0.50
+FRONT_RETREAT_SPEED_MPS = 0.08    # ถอยช้าเพื่อลดการกระชาก
+FRONT_RETREAT_MIN_SPEED_MPS = 0.04
+FRONT_RETREAT_RAMP_TIME_S = 0.25
+FRONT_RETREAT_TIMEOUT_S = 3.0
+FRONT_STOP_SETTLE_TIME_S = 0.30   # รอแรงเฉื่อยหยุดก่อนเริ่มถอย
+FRONT_SAFE_CONFIRM_CYCLES = 3
+FRONT_WRONG_DIRECTION_DROP_MM = 15.0
+FRONT_WRONG_DIRECTION_CYCLES = 3
 TOF_SUB_FREQ_HZ = 50              # ตรวจด้านหน้าแบบ real-time ทุกประมาณ 20 ms
 TOF_CACHE_MAX_AGE_S = 0.15
 
 IR_PORT = 1
 IR_LEFT_ID = 2
 IR_RIGHT_ID = 3
-IR_ACTIVE_LOW = True          # เซนเซอร์ชุดนี้: IO=0 เมื่อพบกำแพง (Active Low)
+IR_ACTIVE_LOW = True          # การตั้งค่าเดิมที่ทดสอบแล้ว: IO=0 คือ WALL (Active Low)
 IR_SAMPLE_COUNT = 5
 IR_SAMPLE_DELAY = 0.008
 IR_PROBE_DISTANCE_M = 0.05    # สไลด์ 5 cm ไปด้านที่ยังไม่พบกำแพงเพื่อตรวจซ้ำ
@@ -57,7 +62,10 @@ IR_PROBE_SETTLE_TIME = 0.15
 IR_SUB_FREQ_HZ = 50           # รับค่า Digital IR ทุกประมาณ 20 ms
 IR_CACHE_MAX_AGE_S = 0.15
 CONTROL_INTERVAL_S = 0.02     # อัปเดตคำสั่ง chassis ที่ 50 Hz
-SIDE_ESCAPE_SPEED_MPS = 0.12  # ความเร็วขยับหนีกำแพงระหว่างเดินตรง
+SIDE_ESCAPE_SPEED_MPS = 0.06  # ลดความเร็วสไลด์บนพื้นลื่น
+SIDE_WALL_CONFIRM_CYCLES = 3  # ต้องพบ WALL ต่อเนื่องก่อนเริ่มหลบ
+SIDE_CLEAR_CONFIRM_CYCLES = 3 # ต้องพบ CLEAR ต่อเนื่องก่อนเลิกหลบ
+SIDE_SPEED_RAMP_MPS_PER_S = 0.30  # จำกัดอัตราการเปลี่ยน y_speed
 
 # --- IMU HEADING HOLD ---
 ATTITUDE_SUB_FREQ_HZ = 50
@@ -97,6 +105,7 @@ robot_y = 0
 heading = NORTH
 tof_mm = 9999
 tof_cache_timestamp = 0.0
+tof_samples = deque(maxlen=5)
 ir_left_value = None
 ir_right_value = None
 ir_cache_timestamp = 0.0
@@ -207,6 +216,7 @@ def tof_callback(distance_info):
         value = distance_info[0]
         if 30 <= value < 10000:
             tof_mm = value
+            tof_samples.append(float(value))
             tof_cache_timestamp = time.monotonic()
     except Exception:
         pass
@@ -274,15 +284,10 @@ def read_ir_filtered(sensor_adaptor, sensor_id, prefer_cache=True):
     return 0 if values.count(0) > values.count(1) else 1
 
 def read_tof_safe():
-    values = []
-    for _ in range(5):
-        tof_is_fresh = time.monotonic() - tof_cache_timestamp <= TOF_CACHE_MAX_AGE_S
-        if tof_is_fresh and 30 <= tof_mm < 10000:
-            values.append(tof_mm)
-        time.sleep(0.015)
-    if not values:
+    tof_is_fresh = time.monotonic() - tof_cache_timestamp <= TOF_CACHE_MAX_AGE_S
+    if not tof_is_fresh or not tof_samples:
         return 9999
-    values.sort()
+    values = sorted(tof_samples)
     return values[len(values) // 2]
 
 def update_wall_from_ir(x, y, direction, ir_value):
@@ -400,6 +405,9 @@ def probe_side_wall(chassis, sensor_adaptor, sensor_id, side_name):
 # ================= MOVEMENT =================
 def turn_left(chassis):
     global heading, heading_target_yaw
+    print(f"[TURN] LEFT from {DIR_NAME[heading]}")
+    chassis.drive_speed(x=0, y=0, z=0)
+    time.sleep(0.10)
     chassis.move(x=0, y=0, z=90, z_speed=TURN_SPEED).wait_for_completed()
     heading = (heading - 1) % 4
     if heading_target_yaw is not None:
@@ -411,6 +419,9 @@ def turn_left(chassis):
 
 def turn_right(chassis):
     global heading, heading_target_yaw
+    print(f"[TURN] RIGHT from {DIR_NAME[heading]}")
+    chassis.drive_speed(x=0, y=0, z=0)
+    time.sleep(0.10)
     chassis.move(x=0, y=0, z=-90, z_speed=TURN_SPEED).wait_for_completed()
     heading = (heading + 1) % 4
     if heading_target_yaw is not None:
@@ -421,24 +432,25 @@ def turn_right(chassis):
     align_heading_stationary(chassis)
 
 def turn_back(chassis):
-    global heading, heading_target_yaw
-    chassis.move(x=0, y=0, z=180, z_speed=TURN_SPEED).wait_for_completed()
-    heading = (heading + 2) % 4
-    if heading_target_yaw is not None:
-        heading_target_yaw = normalize_angle_deg(
-            heading_target_yaw + 180.0 * MOVE_COMMAND_TO_YAW_SIGN
-        )
-    time.sleep(TURN_SETTLE_TIME)
-    align_heading_stationary(chassis)
+    print(f"[TURN] BACK from {DIR_NAME[heading]} using two RIGHT turns")
+    # คำสั่ง 180° ครั้งเดียวอาจไม่เริ่มหลัง speed control จึงแบ่งเป็น 90° สองครั้ง
+    turn_right(chassis)
+    turn_right(chassis)
 
 def turn_to_heading(chassis, target_heading):
     difference = (target_heading - heading) % 4
+    print(
+        f"[TURN PLAN] Current={DIR_NAME[heading]} -> "
+        f"Target={DIR_NAME[target_heading]} | difference={difference}"
+    )
     if difference == 1:
         turn_right(chassis)
     elif difference == 2:
         turn_back(chassis)
     elif difference == 3:
         turn_left(chassis)
+    else:
+        print("[TURN] Already facing target heading; no turn needed")
 
 
 def get_realtime_side_speed():
@@ -461,42 +473,68 @@ def get_realtime_side_speed():
 
 
 def retreat_front_to_safe_distance(chassis):
-    """ถอยจากกำแพงหน้าให้อยู่ช่วง 15-20 cm โดยไม่แก้พิกัดกริด"""
-    for attempt in range(1, FRONT_RETREAT_MAX_ATTEMPTS + 1):
-        front_mm = read_tof_safe()
+    """ถอยด้วย drive_speed จนถึง 17.5 cm โดยไม่แก้พิกัดกริด"""
+    start_time = time.monotonic()
+    start_distance_mm = read_tof_safe()
+    wrong_direction_cycles = 0
+    safe_cycles = 0
 
-        if front_mm == 9999:
-            print("[FRONT RETREAT ERROR] No fresh ToF data; robot remains stopped")
-            return False
+    if start_distance_mm == 9999:
+        print("[FRONT RETREAT ERROR] No fresh ToF data; robot remains stopped")
+        return False
 
-        if FRONT_COLLISION_LIMIT_MM <= front_mm <= FRONT_SAFE_MAX_MM:
-            print(f"[FRONT SAFE] Distance restored to {front_mm:.1f} mm")
-            return True
+    print(f"[FRONT RETREAT] Start at {start_distance_mm:.1f} mm")
 
-        # ถอยอย่างเดียวเพื่อความปลอดภัย หากเลย 20 cm แล้วจะไม่เดินเข้าหากำแพง
-        if front_mm > FRONT_SAFE_MAX_MM or front_mm < 30:
-            print(f"[FRONT SAFE] Stop correction at {front_mm:.1f} mm")
-            return True
+    try:
+        while time.monotonic() - start_time < FRONT_RETREAT_TIMEOUT_S:
+            front_mm = read_tof_safe()
+            if front_mm == 9999:
+                print("[FRONT RETREAT ERROR] ToF data lost; emergency stop")
+                return False
 
-        retreat_m = (FRONT_SAFE_TARGET_MM - front_mm) / 1000.0
-        retreat_m = min(FRONT_RETREAT_MAX_STEP_M, max(0.01, retreat_m))
-        print(
-            f"[FRONT RETREAT] Attempt {attempt}/{FRONT_RETREAT_MAX_ATTEMPTS}: "
-            f"ToF={front_mm:.1f} mm, backward={retreat_m * 100:.1f} cm"
-        )
-        chassis.move(
-            x=-retreat_m,
-            y=0,
-            z=0,
-            xy_speed=FRONT_RETREAT_SPEED
-        ).wait_for_completed()
-        time.sleep(SENSOR_SETTLE_TIME)
+            if front_mm >= FRONT_SAFE_TARGET_MM:
+                chassis.drive_speed(x=0, y=0, z=0)
+                safe_cycles += 1
+                if safe_cycles >= FRONT_SAFE_CONFIRM_CYCLES:
+                    status = "SAFE" if front_mm <= FRONT_SAFE_MAX_MM else "SAFE BUT FAR"
+                    print(f"[FRONT RETREAT] {status}: ToF={front_mm:.1f} mm")
+                    return True
+                time.sleep(CONTROL_INTERVAL_S)
+                continue
 
-    final_mm = read_tof_safe()
-    is_safe = FRONT_COLLISION_LIMIT_MM <= final_mm < 9999
-    status = "SAFE" if is_safe else "STILL TOO CLOSE"
-    print(f"[FRONT RETREAT] {status}: ToF={final_mm:.1f} mm")
-    return is_safe
+            safe_cycles = 0
+
+            # หากระยะลดลงต่อเนื่อง แสดงว่าหุ่นกำลังเคลื่อนผิดทิศหรือยังไหลไปข้างหน้า
+            if front_mm < start_distance_mm - FRONT_WRONG_DIRECTION_DROP_MM:
+                wrong_direction_cycles += 1
+            else:
+                wrong_direction_cycles = 0
+
+            if wrong_direction_cycles >= FRONT_WRONG_DIRECTION_CYCLES:
+                print(
+                    f"[FRONT RETREAT ERROR] ToF decreased to {front_mm:.1f} mm; "
+                    "wrong direction detected, emergency stop"
+                )
+                return False
+
+            elapsed = time.monotonic() - start_time
+            ramp_scale = min(1.0, elapsed / FRONT_RETREAT_RAMP_TIME_S)
+            retreat_speed = max(
+                FRONT_RETREAT_MIN_SPEED_MPS,
+                FRONT_RETREAT_SPEED_MPS * ramp_scale
+            )
+            chassis.drive_speed(
+                x=-retreat_speed,
+                y=0,
+                z=0,
+                timeout=max(0.10, CONTROL_INTERVAL_S * 3)
+            )
+            time.sleep(CONTROL_INTERVAL_S)
+
+        print("[FRONT RETREAT ERROR] Timeout; emergency stop")
+        return False
+    finally:
+        chassis.drive_speed(x=0, y=0, z=0)
 
 
 def normalize_angle_deg(angle):
@@ -573,6 +611,10 @@ def move_forward_realtime(chassis):
     drift_speed_y = DRIFT_COMP_Y / move_duration
     deadline = time.monotonic() + move_duration
     previous_state = None
+    confirmed_side_state = "CLEAR"
+    candidate_side_state = None
+    candidate_cycles = 0
+    command_y = drift_speed_y
     yaw_is_fresh = (
         current_yaw is not None
         and time.monotonic() - attitude_cache_timestamp <= ATTITUDE_CACHE_MAX_AGE_S
@@ -597,21 +639,59 @@ def move_forward_realtime(chassis):
             if tof_is_fresh and 30 <= tof_mm < FRONT_COLLISION_LIMIT_MM:
                 chassis.drive_speed(x=0, y=0, z=0)
                 print(f"[FRONT SAFETY] ToF={tof_mm:.1f} mm < {FRONT_COLLISION_LIMIT_MM:.1f} mm")
+                time.sleep(FRONT_STOP_SETTLE_TIME_S)
                 retreat_front_to_safe_distance(chassis)
                 break
 
-            side_speed_y, correction_state = get_realtime_side_speed()
-            command_y = drift_speed_y if side_speed_y is None else side_speed_y
+            _, raw_side_state = get_realtime_side_speed()
+
+            # Debounce + hysteresis: เปลี่ยนสถานะเมื่อค่าคงที่ต่อเนื่องเท่านั้น
+            if raw_side_state == confirmed_side_state:
+                candidate_side_state = None
+                candidate_cycles = 0
+            else:
+                if raw_side_state == candidate_side_state:
+                    candidate_cycles += 1
+                else:
+                    candidate_side_state = raw_side_state
+                    candidate_cycles = 1
+
+                confirm_cycles = (
+                    SIDE_WALL_CONFIRM_CYCLES
+                    if raw_side_state in ("AVOID_LEFT", "AVOID_RIGHT", "BOTH_WALLS")
+                    else SIDE_CLEAR_CONFIRM_CYCLES
+                )
+                if candidate_cycles >= confirm_cycles:
+                    confirmed_side_state = raw_side_state
+                    candidate_side_state = None
+                    candidate_cycles = 0
+
+            if confirmed_side_state == "AVOID_RIGHT":
+                target_speed_y = -SIDE_ESCAPE_SPEED_MPS
+            elif confirmed_side_state == "AVOID_LEFT":
+                target_speed_y = SIDE_ESCAPE_SPEED_MPS
+            elif confirmed_side_state == "BOTH_WALLS":
+                target_speed_y = 0.0
+            else:
+                target_speed_y = drift_speed_y
+
+            # Ramp y_speed เพื่อไม่ให้ล้อ Mecanum กระชากบนพื้นลื่น
+            max_speed_change = SIDE_SPEED_RAMP_MPS_PER_S * CONTROL_INTERVAL_S
+            speed_error = target_speed_y - command_y
+            command_y += max(
+                -max_speed_change,
+                min(max_speed_change, speed_error)
+            )
             command_z, yaw_error = get_yaw_correction(target_yaw)
 
-            if correction_state != previous_state:
+            if confirmed_side_state != previous_state:
                 yaw_text = "N/A" if yaw_error is None else f"{yaw_error:.2f} deg"
                 print(
-                    f"[REAL-TIME IR] {correction_state} | "
+                    f"[REAL-TIME IR] {confirmed_side_state} | "
                     f"L={ir_left_value}, R={ir_right_value}, "
                     f"y_speed={command_y:.2f} m/s, yaw_error={yaw_text}"
                 )
-                previous_state = correction_state
+                previous_state = confirmed_side_state
 
             chassis.drive_speed(
                 x=MOVE_SPEED,
@@ -641,29 +721,50 @@ def scan_current_cell_smart(chassis, sensor_adaptor, step):
     print(f"SMART SCAN CELL {cell} | Heading: {DIR_NAME[heading]}")
     print("=================================================")
 
-    # ตรวจด้านขวาก่อนตามลำดับการเลือกเส้นทาง แล้วตรวจด้านซ้าย
-    right_ir = probe_side_wall(chassis, sensor_adaptor, IR_RIGHT_ID, "RIGHT")
-    left_ir = probe_side_wall(chassis, sensor_adaptor, IR_LEFT_ID, "LEFT")
-    align_heading_stationary(chassis)
-    front_mm = read_tof_safe()
-
     front_dir = heading
     left_dir = (heading - 1) % 4
     right_dir = (heading + 1) % 4
     back_dir = (heading + 2) % 4
 
-    # IR พบกำแพงด้านใด ให้อัปเดตกำแพงด้านนั้นบนแผนที่ทันที
-    update_wall_from_ir(robot_x, robot_y, left_dir, left_ir)
-    update_wall_from_ir(robot_x, robot_y, right_dir, right_ir)
+    left_state_before = wall_state(robot_x, robot_y, left_dir)
+    right_state_before = wall_state(robot_x, robot_y, right_dir)
+    front_state_before = wall_state(robot_x, robot_y, front_dir)
 
-    if front_mm < FRONT_WALL_LIMIT_MM:
-        update_wall_probability(robot_x, robot_y, front_dir, P_IR_WALL)
-        print(f"[ToF SCAN] Front WALL detected ({front_mm:.1f} mm < {FRONT_WALL_LIMIT_MM} mm)")
+    # ตรวจเฉพาะ UNKNOWN; ด้านที่รู้แล้วว่า FREE/WALL จะไม่ Probe ซ้ำ
+    if right_state_before == "UNKNOWN":
+        right_ir = probe_side_wall(chassis, sensor_adaptor, IR_RIGHT_ID, "RIGHT")
+        update_wall_from_ir(robot_x, robot_y, right_dir, right_ir)
     else:
-        update_wall_probability(robot_x, robot_y, front_dir, P_IR_FREE)
-        print(f"[ToF SCAN] Front FREE ({front_mm:.1f} mm >= {FRONT_WALL_LIMIT_MM} mm)")
+        right_ir = None
+        print(f"[IR SCAN] RIGHT already {right_state_before}; skip")
 
-    update_wall_probability(robot_x, robot_y, back_dir, P_IR_FREE)
+    if left_state_before == "UNKNOWN":
+        left_ir = probe_side_wall(chassis, sensor_adaptor, IR_LEFT_ID, "LEFT")
+        update_wall_from_ir(robot_x, robot_y, left_dir, left_ir)
+    else:
+        left_ir = None
+        print(f"[IR SCAN] LEFT already {left_state_before}; skip")
+
+    if right_state_before == "UNKNOWN" or left_state_before == "UNKNOWN":
+        align_heading_stationary(chassis)
+
+    if front_state_before == "UNKNOWN":
+        front_mm = read_tof_safe()
+        if front_mm < FRONT_WALL_LIMIT_MM:
+            update_wall_probability(robot_x, robot_y, front_dir, P_IR_WALL)
+            print(f"[ToF SCAN] Front WALL detected ({front_mm:.1f} mm < {FRONT_WALL_LIMIT_MM} mm)")
+        else:
+            update_wall_probability(robot_x, robot_y, front_dir, P_IR_FREE)
+            print(f"[ToF SCAN] Front FREE ({front_mm:.1f} mm >= {FRONT_WALL_LIMIT_MM} mm)")
+        front_log = round(front_mm, 1)
+    else:
+        front_mm = None
+        front_log = f"SKIP_{front_state_before}"
+        print(f"[ToF SCAN] Front already {front_state_before}; skip")
+
+    # ช่องด้านหลังคือทางที่หุ่นเพิ่งเดินผ่านมา จึงเป็น FREE โดยไม่ต้องอ่าน Sensor
+    if wall_state(robot_x, robot_y, back_dir) == "UNKNOWN":
+        update_wall_probability(robot_x, robot_y, back_dir, P_IR_FREE)
 
     mark_cell_free(robot_x, robot_y)
     scanned_cells.add(cell)
@@ -671,9 +772,9 @@ def scan_current_cell_smart(chassis, sensor_adaptor, step):
     scan_log.append({
         "Step": step,
         "Robot Pos(x,y)": f"({robot_x},{robot_y})",
-        "IR Left": left_ir,
-        "ToF": round(front_mm, 1),
-        "IR Right": right_ir,
+        "IR Left": left_ir if left_state_before == "UNKNOWN" else f"SKIP_{left_state_before}",
+        "ToF": front_log,
+        "IR Right": right_ir if right_state_before == "UNKNOWN" else f"SKIP_{right_state_before}",
         "Map Status": cell_state(robot_x, robot_y)
     })
 
@@ -738,7 +839,8 @@ def get_next_cell_autonomous():
                 break
             
             for d in (NORTH, EAST, SOUTH, WEST):
-                if wall_state(curr_x, curr_y, d) in ("FREE", "UNKNOWN"):
+                # หลังสำรวจครบ ให้กลับ Goal ผ่านเส้นทางที่ยืนยันว่า FREE แล้วเท่านั้น
+                if wall_state(curr_x, curr_y, d) == "FREE":
                     nx, ny = neighbor_position(curr_x, curr_y, d)
                     if inside_grid(nx, ny) and (nx, ny) not in parent:
                         parent[(nx, ny)] = (curr_x, curr_y)
@@ -768,14 +870,26 @@ def move_to_cell(chassis, sensor_adaptor, target_cell, step):
     turn_to_heading(chassis, target_heading)
     time.sleep(SENSOR_SETTLE_TIME)
 
-    front_mm = read_tof_safe()
-    if front_mm < FRONT_WALL_LIMIT_MM:
-        print(f"[WALL DETECTED] {DIR_NAME[target_heading]} blocked by ToF ({front_mm:.1f} mm < {FRONT_WALL_LIMIT_MM} mm). Recalculating path...")
-        set_wall_log_odds_synced(robot_x, robot_y, target_heading, 4.0)
-        # พบกำแพงหลังหมุน: กลับไปยัง heading เดิมก่อนคำนวณเส้นทางใหม่
+    target_wall_state = wall_state(robot_x, robot_y, target_heading)
+    if target_wall_state == "WALL":
+        print(f"[MOVE BLOCKED] {DIR_NAME[target_heading]} is already WALL")
         turn_to_heading(chassis, original_heading)
-        time.sleep(SENSOR_SETTLE_TIME)
         return False
+
+    if target_wall_state == "UNKNOWN":
+        front_mm = read_tof_safe()
+        if front_mm < FRONT_WALL_LIMIT_MM:
+            print(f"[WALL DETECTED] {DIR_NAME[target_heading]} blocked by ToF ({front_mm:.1f} mm < {FRONT_WALL_LIMIT_MM} mm). Recalculating path...")
+            set_wall_log_odds_synced(robot_x, robot_y, target_heading, 4.0)
+            # พบกำแพงหลังหมุน: กลับไปยัง heading เดิมก่อนคำนวณเส้นทางใหม่
+            turn_to_heading(chassis, original_heading)
+            time.sleep(SENSOR_SETTLE_TIME)
+            return False
+
+        update_wall_probability(robot_x, robot_y, target_heading, P_IR_FREE)
+        print(f"[MOVE CHECK] {DIR_NAME[target_heading]} confirmed FREE by ToF")
+    else:
+        print(f"[MOVE CHECK] {DIR_NAME[target_heading]} already FREE; skip scan")
 
     move_forward_realtime(chassis)
 
@@ -880,6 +994,7 @@ def save_csv(filename, rows):
         print(f"[WARNING] Failed to save {filename}: {e}")
 
 def save_all():
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     save_csv("movement_log.csv", movement_log)
     save_csv("experiment_results.csv", scan_log)
     save_csv("map_history.csv", map_history)
